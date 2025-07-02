@@ -18,6 +18,7 @@ python run_model.py --dataset name --samplingsteps 5
 ```
 
 If you find this work helpful, please consider citing our paper:
+```bibtex
 @article{zheng2024limitorderbookevent,
     title={Limit Order Book Event Stream Prediction with Diffusion Model}, 
     author={Zetao Zheng and Guoan Li and Deqiang Ouyang and Decui Liang and Jie Shao},
@@ -27,5 +28,6 @@ If you find this work helpful, please consider citing our paper:
     primaryClass={q-fin.ST},
     url={https://arxiv.org/abs/2412.09631}, 
 }
+```
 
 
