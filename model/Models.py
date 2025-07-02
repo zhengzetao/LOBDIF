@@ -125,22 +125,33 @@ class Encoder_ST(nn.Module):
             device=device)
 
         # event loc embedding
-        self.event_emb_temporal = nn.Sequential(
-          nn.Linear(1, d_model),
+        # self.event_emb_temporal = nn.Sequential(
+        #         nn.Linear(1, d_model),
+        #         nn.ReLU(),
+        #         nn.Linear(d_model, d_model),
+        #         nn.ReLU(),
+        #         nn.Linear(d_model, d_model),
+                # nn.ReLU(),
+                # nn.Linear(d_model, d_model),
+        # )
+        self.event_emb_layer = nn.Sequential(
+                nn.Linear(loc_dim,d_model),
+                # nn.ReLU(),
+                # nn.Linear(d_model,d_model),
+                # nn.Tanh(),
                 nn.ReLU(),
-                nn.Linear(d_model, d_model),
-                nn.ReLU(),
-                nn.Linear(d_model, d_model),
-                nn.ReLU(),
-                nn.Linear(d_model, d_model),
         )
 
-        self.event_emb_layer = nn.Sequential(
-          nn.Linear(loc_dim,d_model),
-                nn.Tanh(),
+        self.encoutput_emb_layer = nn.Sequential(
+                nn.Linear(2*d_model,d_model),
+                nn.ReLU(),
                 nn.Linear(d_model,d_model),
-                nn.Tanh(),
+                # nn.Tanh(),
+                nn.ReLU(),
         )
+
+        self.event_embed = nn.Embedding(num_embeddings=self.loc_dim, embedding_dim=d_model)
+
 
         # self.event_emb_loc = nn.Sequential(
         #   nn.Linear(self.loc_dim, d_model),
@@ -184,10 +195,11 @@ class Encoder_ST(nn.Module):
         enc_output_temporal = self.temporal_enc(event_time, non_pad_mask) #enc_output_temporal=[bs, seq_len, d_model]
 
         event_one_hot = torch.nn.functional.one_hot(event_loc.squeeze(-1).to(torch.int64),num_classes=self.loc_dim).type(torch.float)
-        
+        # event_one_hot = self.event_embed(event_loc.squeeze(-1).long())  # [B, T, event_embed_dim]
         enc_output_type = self.event_emb_layer(event_one_hot)
         enc_output = enc_output_temporal+enc_output_type #
-
+        # enc_output = torch.cat([enc_output_temporal, enc_output_type], dim=-1)
+        # enc_output = self.encoutput_emb_layer(enc_output)
         # prepare attention masks
         # slf_attn_mask is where we cannot look, i.e., the future and the padding
         slf_attn_mask_subseq = get_subsequent_mask(event_loc, dim=self.loc_dim) ##[50, 554, 554, 2]用于指示在自注意力机制中哪些位置是有效的，通常用于实现因果（causal）遮蔽，确保模型在计算当前时间步的表示时不能看到未来的时间步。
@@ -218,6 +230,45 @@ class Encoder_ST(nn.Module):
         
         return enc_output, enc_output_temporal, enc_output_type
 
+class SimpleEncoderST(nn.Module):
+    def __init__(self, d_model, loc_dim, device=None, CosSin=False):
+        super().__init__()
+        self.d_model = d_model
+        self.loc_dim = loc_dim
+        self.CosSin = CosSin
+
+        self.device = device
+        self.position_vec = torch.tensor(
+            [math.pow(10000.0, 2.0 * (i // 2) / d_model) for i in range(d_model)],
+            device=device)
+
+        self.event_emb = nn.Linear(loc_dim, d_model)
+        self.temporal_proj = nn.Linear(d_model, d_model)
+        self.combined_proj = nn.Sequential(
+            nn.Linear(2 * d_model, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model)
+        )
+
+    def temporal_encoding(self, time):
+        # time: [B, T]
+        pos_enc = time.unsqueeze(-1) / self.position_vec
+        pos_enc[:, :, 0::2] = torch.sin(pos_enc[:, :, 0::2])
+        pos_enc[:, :, 1::2] = torch.cos(pos_enc[:, :, 1::2])
+        return self.temporal_proj(pos_enc)
+
+    def forward(self, event_loc, event_time, non_pad_mask=None):
+        # event_loc: [B, T, loc_dim] (one-hot)
+        # event_time: [B, T]
+        event_one_hot = torch.nn.functional.one_hot(event_loc.squeeze(-1).to(torch.int64),num_classes=self.loc_dim).type(torch.float)
+        event_emb = self.event_emb(event_one_hot)  # [B, T, d_model]
+        time_emb = self.temporal_encoding(event_time)  # [B, T, d_model]
+
+        combined = torch.cat([event_emb, time_emb], dim=-1)
+        enc_output = self.combined_proj(combined)
+
+        # 为兼容原接口（尽管实际简化）
+        return enc_output, time_emb, event_emb
 
 class RNN_layers(nn.Module):
     """
@@ -307,6 +358,12 @@ class Transformer_ST(nn.Module):
             loc_dim = loc_dim,
             CosSin = CosSin
         )
+        # self.encoder = SimpleEncoderST(
+        #     d_model=d_model,
+        #     loc_dim=loc_dim,
+        #     device=device,
+        #     CosSin=CosSin
+        # )
 
         # parameter for the weight of time difference
         self.alpha = nn.Parameter(torch.tensor(-0.1))
@@ -329,15 +386,11 @@ class Transformer_ST(nn.Module):
         """
 
         non_pad_mask = get_non_pad_mask(event_time)
-        
         enc_output, enc_output_temporal, enc_output_loc = self.encoder(event_loc, event_time, non_pad_mask)
-
         assert (enc_output != enc_output_temporal).any() & (enc_output != enc_output_loc).any() & (enc_output_loc != enc_output_temporal).any()
         
         # enc_output = self.rnn(enc_output, non_pad_mask)
         # enc_output_temporal = self.rnn_temporal(enc_output_temporal, non_pad_mask)
         # enc_output_loc = self.rnn_spatial(enc_output_loc, non_pad_mask)
-
         enc_output_all = torch.cat((enc_output_temporal, enc_output_loc, enc_output),dim=-1)
-
         return enc_output_all, non_pad_mask

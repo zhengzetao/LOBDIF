@@ -179,19 +179,19 @@ class PreNorm(nn.Module):
 
 # sinusoidal positional embeds
 
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
+# class SinusoidalPosEmb(nn.Module):
+#     def __init__(self, dim):
+#         super().__init__()
+#         self.dim = dim
 
-    def forward(self, x):
-        device = x.device
-        half_dim = self.dim // 2
-        emb = math.log(10000) / (half_dim - 1)
-        emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb = x[:, None] * emb[None, :]
-        emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        return emb
+#     def forward(self, x):
+#         device = x.device
+#         half_dim = self.dim // 2
+#         emb = math.log(10000) / (half_dim - 1)
+#         emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
+#         emb = x[:, None] * emb[None, :]
+#         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
+#         return emb
 
 # gaussian diffusion trainer class
 
@@ -473,15 +473,24 @@ class GaussianDiffusion_ST(nn.Module):
 
             alpha = self.alphas_cumprod[time]
             alpha_next = self.alphas_cumprod[time_next]
+            epsilon = 1e-8
+            temp = (1 - alpha / (alpha_next + epsilon)) * (1 - alpha_next) / (1 - alpha + epsilon)
+            temp = torch.clamp(temp, min=0.)  # 确保 sqrt 不爆
+            sigma = eta * temp.sqrt()
 
-            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
-            c = (1 - alpha_next - sigma ** 2).sqrt()
+            temp_c = 1 - alpha_next - sigma ** 2
+            temp_c = torch.clamp(temp_c, min=0.)
+            c = temp_c.sqrt()
+
+            # sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            # c = (1 - alpha_next - sigma ** 2).sqrt()
 
             noise = torch.randn_like(img)
             img = x_start * alpha_next.sqrt() + \
                   c * pred_noise + \
                   sigma * noise
-
+            if torch.isnan(img).any():
+                pdb.set_trace()
         img = unnormalize_to_zero_to_one(img)
         # img[..., 1] = torch.round(img[..., 1])
         return img
@@ -515,6 +524,13 @@ class GaussianDiffusion_ST(nn.Module):
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start +
             extract(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
         )
+    
+    # def q_sample_discrete(self, x_start, t, noise=None):
+    #     b, c, n = x_start.shape
+    #     noise = default(noise, lambda: torch.randint_like(x_start, low=0, high=K))
+    #     mask = torch.bernoulli(1 - extract(self.sqrt_alphas_cumprod, t, x_start.shape))
+    #     return x_start * mask + noise * (1 - mask)
+
 
     @property
     def loss_fn(self):
@@ -569,37 +585,63 @@ class GaussianDiffusion_ST(nn.Module):
             loss = self.loss_fn(model_out, target)
         loss = reduce(loss, 'b ... -> b (...)', 'mean')
         loss = loss * extract(self.p2_loss_weight, t, loss.shape)
+
+        # 6. === 新增：辅助分类损失 ===
+        # 获取预测的连续向量（根据目标类型）
+        maybe_clip = partial(torch.clamp, min = -1., max = 1.)
+        if self.objective == 'pred_noise':
+            pred_noise = model_out
+            x_0 = self.predict_start_from_noise(x, t, pred_noise)
+            x_0 = maybe_clip(x_0)
+
+        elif self.objective == 'pred_x0':
+            x_0 = model_out
+            x_0 = maybe_clip(x_0)
+            pred_noise = self.predict_noise_from_start(x, t, x_0)
+
+        elif self.objective == 'pred_v':
+            v = model_out
+            x_0 = self.predict_start_from_v(x, t, v)
+            x_0 = maybe_clip(x_0)
+            pred_noise = self.predict_noise_from_start(x, t, x_0)
+     
+        # caculate cross_entropy loss
+        ce_loss = F.cross_entropy(
+            x_0[:,0,1:], 
+            torch.argmax(x_start[:,0,1:], dim=1),
+            reduction='mean'
+        )
         e0 = time.time()
-        return loss.mean()
+        return loss.mean() + 0.2*ce_loss
 
-    def NLL_cal(self, img, cond, noise=None):
-        x_start = normalize_to_neg_one_to_one(img)
-        b, c, n, device  = *x_start.shape,x_start.device
-        noise = default(noise, lambda: torch.randn_like(x_start))
+    # def NLL_cal(self, img, cond, noise=None):
+    #     x_start = normalize_to_neg_one_to_one(img)
+    #     b, c, n, device  = *x_start.shape,x_start.device
+    #     noise = default(noise, lambda: torch.randn_like(x_start))
 
-        vb_all, vb_temporal_all, vb_spatial_all = [], [], []
+    #     vb_all, vb_temporal_all, vb_spatial_all = [], [], []
 
-        for tt in list(range(self.num_timesteps))[::-1]:
-            t = torch.tensor([tt]).expand(b).long().to(device)
-            x = self.q_sample(x_start = x_start, t = t, noise = noise)
-            vb, vb_temporal, vb_spatial = self._vb_terms_bpd(x_start,x,t,clip_denoised=True,cond=cond)
-            vb_all.append(vb.unsqueeze(dim=1))
-            vb_temporal_all.append(vb_temporal.unsqueeze(dim=1))
-            vb_spatial_all.append(vb_spatial.unsqueeze(dim=1))
+    #     for tt in list(range(self.num_timesteps))[::-1]:
+    #         t = torch.tensor([tt]).expand(b).long().to(device)
+    #         x = self.q_sample(x_start = x_start, t = t, noise = noise)
+    #         vb, vb_temporal, vb_spatial = self._vb_terms_bpd(x_start,x,t,clip_denoised=True,cond=cond)
+    #         vb_all.append(vb.unsqueeze(dim=1))
+    #         vb_temporal_all.append(vb_temporal.unsqueeze(dim=1))
+    #         vb_spatial_all.append(vb_spatial.unsqueeze(dim=1))
 
-        vb_all = torch.sum(torch.cat(vb_all,dim=-1),dim=-1)
-        vb_temporal_all = torch.sum(torch.cat(vb_temporal_all,dim=-1),dim=-1)
-        vb_spatial_all = torch.sum(torch.cat(vb_spatial_all,dim=-1),dim=-1)
+    #     vb_all = torch.sum(torch.cat(vb_all,dim=-1),dim=-1)
+    #     vb_temporal_all = torch.sum(torch.cat(vb_temporal_all,dim=-1),dim=-1)
+    #     vb_spatial_all = torch.sum(torch.cat(vb_spatial_all,dim=-1),dim=-1)
 
-        prior_bpd = self._prior_bpd(x_start)
-        prior_bpd_temporal = self._prior_bpd(x_start[:,:,:1])
-        prior_bpd_spatial = self._prior_bpd(x_start[:,:,-(self.seq_length-1):])
-        total_bpd = vb_all + prior_bpd
-        total_bpd_temporal = vb_temporal_all + prior_bpd_temporal
-        total_bpd_spatial = vb_spatial_all + prior_bpd_spatial
+    #     prior_bpd = self._prior_bpd(x_start)
+    #     prior_bpd_temporal = self._prior_bpd(x_start[:,:,:1])
+    #     prior_bpd_spatial = self._prior_bpd(x_start[:,:,-(self.seq_length-1):])
+    #     total_bpd = vb_all + prior_bpd
+    #     total_bpd_temporal = vb_temporal_all + prior_bpd_temporal
+    #     total_bpd_spatial = vb_spatial_all + prior_bpd_spatial
 
-        assert vb_all.shape == prior_bpd.shape
-        return vb_all.sum().item(), vb_temporal_all.sum().item(), vb_spatial_all.sum().item()
+    #     assert vb_all.shape == prior_bpd.shape
+    #     return vb_all.sum().item(), vb_temporal_all.sum().item(), vb_spatial_all.sum().item()
 
 
     def _prior_bpd(self, x_start):
@@ -673,7 +715,7 @@ class GaussianDiffusion_ST(nn.Module):
         b, c, n, device, seq_length, = *img.shape, img.device, self.seq_length
         assert n == seq_length, f'seq length must be {seq_length}'
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long()
-        img = normalize_to_neg_one_to_one(img)
+        # img = normalize_to_neg_one_to_one(img)
         return self.p_losses(img, t, cond=cond,  *args, **kwargs)
 
 

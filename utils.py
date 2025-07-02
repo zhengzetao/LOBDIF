@@ -84,7 +84,7 @@ def data_loader(dataset, len_of_record):
     df_train = pd.read_csv('./LOBSTER/WRDS/{}_train.csv'.format(dataset))
     # df_ = pd.read_csv('./LOBSTER/WRDS/{}_valid.csv'.format(dataset)) #only for MSFT
     # df_train = pd.concat([df_train, df_], ignore_index=True)  # ignore_index=True 重新索引
-    df_train = df_train.tail(40000)
+    df_train = df_train.tail(4000)
     delta_time = np.array(df_train.TIME_M[1:]) - np.array(df_train.TIME_M[:-1])
     delta_time[delta_time < 0] = 0
     df_train = df_train[1:]
@@ -93,7 +93,7 @@ def data_loader(dataset, len_of_record):
     train_record_list, _, _ = normalize(train_record_list)
     ## validation data loading ##
     df_valid = pd.read_csv('./LOBSTER/WRDS/{}_valid.csv'.format(dataset))
-    df_valid = df_valid.head(2000)
+    # df_valid = df_valid.head(4000)
     delta_time = np.array(df_valid.TIME_M[1:]) - np.array(df_valid.TIME_M[:-1])
     delta_time[delta_time < 0] = 0
     df_valid = df_valid[1:]
@@ -112,8 +112,7 @@ def data_loader(dataset, len_of_record):
     print("Number of rows in df_train:", len(df_train))
     print("Number of rows in df_valid:", len(df_valid))
     print("Number of rows in df_test:", len(df_test))
-
-    return train_record_list, val_record_list, test_record_list, (val_max, val_min, test_max, test_min)
+    return val_record_list, val_record_list, test_record_list, (val_max, val_min, test_max, test_min)
 
 def parse_datasets(device,batch_size,dataset,train_percentage=0.8):
     total_dataset = dataset
@@ -275,35 +274,38 @@ def metrics_calculate(sampled_seq, event_time_non_mask, event_loc_non_mask):
     event_loc_non_mask: (batch_size * seq_len, 1, 1)
     '''
     # loss_test_all += loss.item() * event_time_non_mask.shape[0]
-    real = (event_time_non_mask[:,0,:].detach().cpu() )
-    gen = (sampled_seq[:,0,:1].detach().cpu() )
+    real_time = (event_time_non_mask[:,0,:].detach().cpu())
+    gen_time = (sampled_seq[:,0,:1].detach().cpu())
     # real = (event_time_non_mask[:,0,:].detach().cpu() + MIN[1]) * (MAX[1]-MIN[1])
     # gen = (sampled_seq[:,0,:1].detach().cpu() + MIN[1]) * (MAX[1]-MIN[1])
-    assert real.shape==gen.shape
+    assert real_time.shape==gen_time.shape
     # assert real.shape == a.shape
     # mae_temporal = torch.abs(real-gen).sum().item()
     
     # mae_temporal = torch.abs(real-gen).mean()
-    rmse_temporal = ((real-gen)**2).sum().item()
+    rmse_temporal = ((real_time-gen_time)**2).sum().item()
     # log_gen = torch.log10(real)
-    mae_temporal_mean = torch.abs(torch.log10(real+ 1e-10)- torch.log10(gen + 1e-10)).mean().item()
-    # mae_temporal_mean = torch.abs(real-gen).mean().item()
+    log_real_time = torch.where(torch.isnan(torch.log10(real_time+ 1e-10)), torch.tensor(0.0), torch.log10(real_time+ 1e-10))
+    log_gen_time = torch.where(torch.isnan(torch.log10(gen_time + 1e-10)), torch.tensor(0.0), torch.log10(gen_time + 1e-10))
+    # mae_temporal_mean = torch.abs(torch.log10(real_time+ 1e-10)- torch.log10(gen_time + 1e-10)).mean().item()
+    mae_temporal_mean = torch.abs(log_real_time-log_gen_time).mean().item()
     rmse_temporal_mean = rmse_temporal/sampled_seq.shape[0]
     # rmse_temporal_mean += ((real-sampled_seq_temporal_all)**2).sum().item()
     ####### calculate the predict accuracy -#############
-    real = event_loc_non_mask[:,0,:].detach().cpu()
+    real_event = event_loc_non_mask[:,0,:].detach().cpu()
     # assert real.shape[1:] == torch.tensor(MIN[2:]).shape
     # real = (real + torch.tensor([MIN[2:]])) * (torch.tensor([MAX[2:]])-torch.tensor([MIN[2:]]))
-    gen = sampled_seq[:,0,1:].detach().cpu() # sampled_seq如何保证生成的是0-1之间
+    gen_event = sampled_seq[:,0,1:].detach().cpu() # sampled_seq如何保证生成的是0-1之间
     # gen = (gen + torch.tensor([MIN[2:]])) * (torch.tensor([MAX[2:]])-torch.tensor([MIN[2:]]))
-    assert real.shape[0]==gen.shape[0]
+    assert real_event.shape[0]==gen_event.shape[0]
     # assert real.shape==np.array(sampled_seq_spatial_all).shape
     # mae_spatial = torch.sqrt(torch.sum((real-gen)**2,dim=-1)).sum().item()
     # mae_spatial_mean = mae_spatial/sampled_seq.shape[0]
     ####### calculate the cross-entropy loss-#############
-    cross_entropy_loss = torch.nn.CrossEntropyLoss()(gen.softmax(dim=1),real)
+    cross_entropy_loss = torch.nn.CrossEntropyLoss()(gen_event.softmax(dim=1),real_event)
     # next_target_event = seq_event[:,-1,] #这里有错误，没有seq_event
     next_pred_event = torch.argmax(sampled_seq[:,0,1:],dim=1).detach().cpu()
-    pred_accuracy = (torch.sum(torch.argmax(real,dim=1)==next_pred_event)).item()/len(next_pred_event)
+    pred = torch.argmax(real_event, dim=1)
+    pred_accuracy = (torch.sum(torch.argmax(real_event,dim=1)==next_pred_event)).item()/len(next_pred_event)
 
     return cross_entropy_loss, pred_accuracy, mae_temporal_mean

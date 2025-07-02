@@ -20,7 +20,7 @@ def define_args():
     parser = argparse.ArgumentParser('LOB event prediction')
     parser.add_argument('--dataset',  type=str, default="INTC", help="dataset used")
     parser.add_argument('--class_loss_weight', type=int, default=1)
-    parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=2e-3)
     parser.add_argument('--model', type=str, default='LOBDIF')
     parser.add_argument('--mkt_state', action='store_true', default=True)
@@ -61,7 +61,7 @@ def main(dataset="MSFT",class_loss_weight=1,model='LOBDIF',mkt_state=True,seed=0
     batch_size = args.batch_size
     niter = args.niter#15#200
     lr = args.lr
-    model_path_known_t = './models/{}_{}_mkt-{}_coef-{}_{}rms{}_new.mdl'.format(args.dataset,args.model,args.mkt_state,args.class_loss_weight,args.lr,2e-3)
+    model_path_known_t = './models/{}.pt'.format(args.dataset,args.model,args.mkt_state,args.class_loss_weight,args.lr,2e-3)
     log_path = './logs/{}_{}_mkt-{}_coef-{}_{}rms{}_new.log'.format(args.dataset,args.model,args.mkt_state,args.class_loss_weight,args.lr,2e-3)
     
     # Ensure the directory exists
@@ -107,7 +107,7 @@ def main(dataset="MSFT",class_loss_weight=1,model='LOBDIF',mkt_state=True,seed=0
 
     models = Model_all(transformer,diffusion)
     models = models.cuda()
-    warmup_steps = 5
+    # warmup_steps = 5
     # training
     optimizer = AdamW(models.parameters(), lr = 1e-3, betas = (0.9, 0.99))
     step, early_stop = 0, 0
@@ -204,14 +204,18 @@ def main(dataset="MSFT",class_loss_weight=1,model='LOBDIF',mkt_state=True,seed=0
                     sample_start_time = time.time()
                     sampled_seq = models.diffusion.sample(batch_size = event_time_non_mask.shape[0],cond=enc_out_non_mask)
                     event_time_inverse_normalize = inverse_normalize(event_time_non_mask, MAX_MIN[2:], device)
+                    # pdb.set_trace()
                     sampled_seq[:,0,0] = inverse_normalize(sampled_seq[:,0,0], MAX_MIN[2:], device)
                     sampled_time_consume.append(time.time() - sample_start_time)
                     # pdb.set_trace()
                     # print(sampled_seq[:3,0,1:],event_loc_non_mask[:3,0,:])
                     ce_loss, accuracy_score, temporal_loss = metrics_calculate(sampled_seq, event_time_inverse_normalize, event_loc_non_mask)
-                    cross_entropy_loss_test.append(ce_loss)
+                    if torch.isnan(ce_loss): pdb.set_trace()
+                    if not torch.isnan(ce_loss).any(): cross_entropy_loss_test.append(ce_loss)
                     accuracy_test.append(accuracy_score)
                     temporal_loss_test.append(temporal_loss)
+                    if np.isnan(sum(cross_entropy_loss_test) / len(cross_entropy_loss_test)) and len(cross_entropy_loss_test)>0:
+                        pdb.set_trace()
                 elapsed_time = time.time() - start_time
                 print('average sampling time:',  sum(sampled_time_consume) / len(sampled_time_consume))
                 test_message = 'Test Cross_entropy_loss, {:.4f} Accuracy_score {:.4f}, Temporal error {:.4f}, Test time consume {:.4f} '.format((sum(cross_entropy_loss_test) / len(cross_entropy_loss_test)), (sum(accuracy_test) / len(accuracy_test)),  (sum(temporal_loss_test) / len(temporal_loss_test)), elapsed_time)
