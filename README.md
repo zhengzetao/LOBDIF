@@ -10,9 +10,22 @@ We propose a diffusion-based generative framework for modeling and predicting ev
 
 ## Getting Started
 
-### 1. Clone the Repository
+### 1. Run the model
 
 ```bash
-git clone https://github.com/yourusername/lob-diffusion.git
 cd lob-diffusion
+python run_model.py --dataset name --samplingsteps 5
+```
+
+If you find this work helpful, please consider citing our paper:
+@article{zheng2024limitorderbookevent,
+    title={Limit Order Book Event Stream Prediction with Diffusion Model}, 
+    author={Zetao Zheng and Guoan Li and Deqiang Ouyang and Decui Liang and Jie Shao},
+    year={2024},
+    eprint={2412.09631},
+    archivePrefix={arXiv},
+    primaryClass={q-fin.ST},
+    url={https://arxiv.org/abs/2412.09631}, 
+}
+
 
